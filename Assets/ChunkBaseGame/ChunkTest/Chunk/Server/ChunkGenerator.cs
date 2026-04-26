@@ -2,120 +2,28 @@ using System;
 using System.Collections.Generic;
 using UnityEngine;
 
-// 职责：根据 chunk 身份与边界，生成一份可序列化的“区块对象数据”。
-// 最小原型目标：
-// - ChunkManager 只负责区块加载/卸载调度
-// - 生成/读写/实例化/保存统一放在这里
+// 职责：仅负责「区块里要生成哪些内容、怎么生成、生成在哪」。
+// - 输入：区块身份与边界（ChunkData）、配置（ChunkSettings）。
+// - 输出：可序列化的 ChunkObjectSaveData（prefabIndex + chunk-local 格点 x,y,z）。
+// 不做：读档/写盘、Instantiate、场景根节点、运行时回写；这些由 ChunkManager 负责。
 public static class ChunkGenerator
 {
-    #region Public API（供 ChunkManager 调用）
-
-    public static void OnChunkLoaded(ChunkData chunk, ChunkSettings settings)
+    /// <summary>
+    /// 无存档时由 ChunkManager 调用。在此处分支不同生成策略（高度柱 / 体素 / 表驱动等）。
+    /// </summary>
+    public static ChunkObjectSaveData GenerateChunkObjectSaveData(ChunkData chunk, ChunkSettings settings)
     {
-        if (chunk == null)
+        if (chunk == null || settings.SpawnPrefabs == null)
         {
-            return;
+            return null;
         }
 
-        GameObject[] prefabs = settings.SpawnPrefabs;
-        if (prefabs == null || prefabs.Length == 0)
-        {
-            return;
-        }
-
-        EnsureChunkObjectRoot(chunk, settings);
-
-        if (!ChunkStorager.TryLoadChunkObjects(chunk.Id, settings, out ChunkObjectSaveData data))
-        {
-            data = GenerateData(chunk, prefabs.Length);
-            // 第一次生成：必定为脏数据，走异步写盘，避免阻塞主线程。
-            chunk.MarkObjectSaveDirty();
-            ChunkStorager.SaveChunkObjectsAsync(data, settings);
-            chunk.ClearObjectSaveDirty();
-        }
-
-        chunk.ObjectSaveData = data;
-        chunk.SpawnedInstances.Clear();
-
-        if (data.spawns == null)
-        {
-            return;
-        }
-
-        Vector3 worldOrigin = new Vector3(chunk.Bounds.MinX, chunk.Bounds.MinY, chunk.Bounds.MinZ);
-        for (int i = 0; i < data.spawns.Count; i++)
-        {
-            ChunkSpawnData s = data.spawns[i];
-            if ((uint)s.prefabIndex >= (uint)prefabs.Length)
-            {
-                chunk.SpawnedInstances.Add(null);
-                continue;
-            }
-
-            GameObject prefab = prefabs[s.prefabIndex];
-            if (prefab == null)
-            {
-                chunk.SpawnedInstances.Add(null);
-                continue;
-            }
-
-            GameObject go = UnityEngine.Object.Instantiate(prefab, chunk.ObjectRoot);
-            go.name = $"{prefab.name} ({chunk.Coord.X},{chunk.Coord.Z})#{i}";
-            go.transform.position = worldOrigin + new Vector3(s.x, s.y, s.z);
-            go.transform.rotation = Quaternion.identity;
-
-            chunk.SpawnedInstances.Add(go.transform);
-            chunk.OnEnterChunk(go.transform);
-        }
+        int prefabCount = settings.SpawnPrefabs.Length;
+        return GenerateHeightColumnPrefabSpawns(chunk, prefabCount);
     }
 
-    public static void OnChunkUnloading(ChunkData chunk, ChunkSettings settings)
-    {
-        if (chunk == null)
-        {
-            return;
-        }
-
-        if (chunk.ObjectSaveData != null && chunk.ObjectSaveData.spawns != null)
-        {
-            // 回写：把运行时 transform 的位置/旋转写回 chunk-local 数据（若实例数量对齐）。
-            int count = Mathf.Min(chunk.ObjectSaveData.spawns.Count, chunk.SpawnedInstances.Count);
-            Vector3 worldOrigin = new Vector3(chunk.Bounds.MinX, chunk.Bounds.MinY, chunk.Bounds.MinZ);
-            for (int i = 0; i < count; i++)
-            {
-                Transform t = chunk.SpawnedInstances[i];
-                if (t == null)
-                {
-                    continue;
-                }
-
-                ChunkSpawnData s = chunk.ObjectSaveData.spawns[i];
-                Vector3 local = t.position - worldOrigin;
-                s.x = Mathf.RoundToInt(local.x);
-                s.y = Mathf.RoundToInt(local.y);
-                s.z = Mathf.RoundToInt(local.z);
-                chunk.MarkObjectSaveDirty();
-            }
-
-            if (chunk.IsObjectSaveDirty)
-            {
-                // 卸载：只在脏时写盘，写盘异步化，减少离开窗口时的卡顿尖峰。
-                ChunkStorager.SaveChunkObjectsAsync(chunk.ObjectSaveData, settings);
-                chunk.ClearObjectSaveDirty();
-            }
-        }
-
-        chunk.SpawnedInstances.Clear();
-        chunk.DetachAllEntities();
-
-        DestroyChunkObjectRoot(chunk);
-    }
-
-    #endregion
-
-    #region Data Generation（原型：含 Y 轴的“高度柱”）
-
-    private static ChunkObjectSaveData GenerateData(ChunkData chunk, int prefabCount)
+    /// <summary>原型：Perlin 高度图 + 每列竖条 prefab 占位；坐标为 chunk-local 整数格点。</summary>
+    private static ChunkObjectSaveData GenerateHeightColumnPrefabSpawns(ChunkData chunk, int prefabCount)
     {
         if (chunk == null)
         {
@@ -131,16 +39,12 @@ public static class ChunkGenerator
             };
         }
 
-        // 用 chunkId 做 seed，保证“哈希性/稳定性”：同一 chunk 第一次生成可复现。
         long seedLong = chunk.Id;
         int seed = unchecked((int)(seedLong ^ (seedLong >> 32)));
         System.Random rng = new System.Random(seed);
 
-        // 原型验证：把 prefab 当作“方块”，每个方块占据 (x,y,z) 一格。
-        // 生成方式：对每个 (x,z) 生成一个高度 h，然后填充 y=0..h-1。
         int size = Mathf.Max(1, chunk.Bounds.Size);
         int heightRange = Mathf.Max(1, chunk.Bounds.MaxYInclusive - chunk.Bounds.MinY + 1);
-        // prefab 实验阶段避免生成过多 GameObject，先做一个上限（后续切体素网格再放开）。
         int maxColumnHeight = Mathf.Min(16, heightRange);
 
         ChunkObjectSaveData data = new ChunkObjectSaveData
@@ -149,8 +53,6 @@ public static class ChunkGenerator
             spawns = new List<ChunkSpawnData>(size * size * Mathf.Max(1, maxColumnHeight / 2))
         };
 
-        // 使用 PerlinNoise 生成高度图（连续地形）。
-        // worldSeed 通过偏移注入，noiseSmoothness 控制采样尺度（越大越平滑）。
         float smooth = chunk.Settings.NoiseSmoothness;
         int seedX = chunk.Settings.WorldSeed * 1013;
         int seedZ = chunk.Settings.WorldSeed * 1999;
@@ -163,7 +65,7 @@ public static class ChunkGenerator
                 int worldZ = chunk.Bounds.MinZ + z;
                 float nx = (worldX + seedX) / smooth;
                 float nz = (worldZ + seedZ) / smooth;
-                float n = Mathf.PerlinNoise(nx, nz); // [0,1]
+                float n = Mathf.PerlinNoise(nx, nz);
                 int h = Mathf.Clamp(1 + Mathf.FloorToInt(n * maxColumnHeight), 1, maxColumnHeight);
                 int prefabIndex = rng.Next(0, prefabCount);
                 for (int y = 0; y < h; y++)
@@ -181,42 +83,4 @@ public static class ChunkGenerator
 
         return data;
     }
-
-    #endregion
-
-    #region Object Root（挂载与销毁）
-
-    private static void EnsureChunkObjectRoot(ChunkData chunk, ChunkSettings settings)
-    {
-        if (chunk.ObjectRoot != null)
-        {
-            return;
-        }
-
-        Transform parent = GetOrCreateChunkObjectParent(settings);
-        GameObject go = new GameObject($"ChunkObjects ({chunk.Coord.X}, {chunk.Coord.Z})");
-        go.transform.SetParent(parent, worldPositionStays: false);
-        go.transform.position = new Vector3(chunk.Bounds.MinX, 0f, chunk.Bounds.MinZ);
-        chunk.ObjectRoot = go.transform;
-    }
-
-    private static Transform GetOrCreateChunkObjectParent(ChunkSettings settings)
-    {
-        // 约定：由 ChunkConfig/ChunkSettings 保证该引用不为空。
-        // Generator 不负责“兜底创建”，避免隐藏行为与生命周期难追踪。
-        return settings.ChunkObjectParent;
-    }
-
-    private static void DestroyChunkObjectRoot(ChunkData chunk)
-    {
-        if (chunk.ObjectRoot == null)
-        {
-            return;
-        }
-
-        UnityEngine.Object.Destroy(chunk.ObjectRoot.gameObject);
-        chunk.ObjectRoot = null;
-    }
-
-    #endregion
 }

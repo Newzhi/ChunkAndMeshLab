@@ -67,9 +67,6 @@ public sealed class ChunkData2D
     public ChunkObjectSaveData2D ObjectSaveData { get; set; }
     public readonly List<Transform> SpawnedInstances = new List<Transform>();
 
-    private readonly HashSet<Transform> entities = new HashSet<Transform>();
-    public IReadOnlyCollection<Transform> Entities => entities;
-
     public ChunkData2D(ChunkCoord2D coord, ChunkSettings2D settings, ChunkState2D state)
     {
         Coord = coord;
@@ -79,16 +76,6 @@ public sealed class ChunkData2D
     }
 
     public void SetState(ChunkState2D state) => State = state;
-
-    public bool OnEnterChunk(Transform entity) => entity != null && entities.Add(entity);
-    public bool OnExitChunk(Transform entity) => entity != null && entities.Remove(entity);
-
-    public List<Transform> DetachAllEntities()
-    {
-        List<Transform> detached = new List<Transform>(entities);
-        entities.Clear();
-        return detached;
-    }
 }
 
 [Serializable]

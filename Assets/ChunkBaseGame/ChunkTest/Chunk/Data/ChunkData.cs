@@ -128,26 +128,6 @@ public sealed class ChunkData
 
     #endregion
 
-    #region 定义 — 实体集合（运行时托管）
-
-    // 当前被该区块持有并管理的 Transform（运行时集合，去重）。
-    private readonly HashSet<Transform> entities = new HashSet<Transform>();
-
-    public IReadOnlyCollection<Transform> Entities => entities;
-
-    #endregion
-
-    #region 定义 — Dirty（存档写入标脏）
-
-    // 标识：ObjectSaveData 是否需要写盘（运行时状态，不参与序列化）。
-    public bool IsObjectSaveDirty { get; private set; }
-
-    public void MarkObjectSaveDirty() => IsObjectSaveDirty = true;
-
-    public void ClearObjectSaveDirty() => IsObjectSaveDirty = false;
-
-    #endregion
-
     #region 构造
 
     public ChunkData(ChunkCoord coord, ChunkSettings settings, ChunkState state)
@@ -159,40 +139,6 @@ public sealed class ChunkData
     }
 
     public void SetState(ChunkState state) => State = state;
-
-    #endregion
-
-    #region 基本操作
-
-    // 对象进入区块：纳入该区块管理。
-    public bool OnEnterChunk(Transform entity)
-    {
-        if (entity == null)
-        {
-            return false;
-        }
-
-        return entities.Add(entity);
-    }
-
-    // 对象离开区块：从该区块移除管理。
-    public bool OnExitChunk(Transform entity)
-    {
-        if (entity == null)
-        {
-            return false;
-        }
-
-        return entities.Remove(entity);
-    }
-
-    // 区块卸载时调用：导出并清空当前持有对象，交给 Manager 暂存。
-    public List<Transform> DetachAllEntities()
-    {
-        List<Transform> detached = new List<Transform>(entities);
-        entities.Clear();
-        return detached;
-    }
 
     #endregion
 }

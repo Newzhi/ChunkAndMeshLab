@@ -75,7 +75,6 @@ public static class ChunkGenerator2D
         go0.transform.rotation = Quaternion.identity;
 
         chunk.SpawnedInstances.Add(go0.transform);
-        chunk.OnEnterChunk(go0.transform);
     }
 
     public static void OnChunkUnloading(ChunkData2D chunk, ChunkSettings2D settings)
@@ -109,7 +108,6 @@ public static class ChunkGenerator2D
         }
 
         chunk.SpawnedInstances.Clear();
-        chunk.DetachAllEntities();
         DestroyChunkObjectRoot(chunk);
     }
 

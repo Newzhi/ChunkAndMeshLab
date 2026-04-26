@@ -14,8 +14,8 @@
 - `Assets/ChunkBaseGame/ChunkTest/Chunk/Utils/`
   - `ChunkUtil.cs`：**工具类**（纯函数坐标转换：World ↔ ChunkCoord/Local）
 - `Assets/ChunkBaseGame/ChunkTest/Chunk/Server/`
-  - `ChunkManager.cs`：**调度层**（窗口刷新、Load/Unload，生命周期管理；不掺杂生成/存储细节）
-  - `ChunkGenerator.cs`：**内容层**（生成/实例化/卸载回写；当前用 prefab 验证闭环）
+  - `ChunkManager.cs`：**区块与内容管线**（窗口、Load/Unload、读档/写盘、实例化、卸载回写、场景根节点）
+  - `ChunkGenerator.cs`：**纯生成逻辑**（每个区块生成哪些东西、怎么生成、chunk-local 格点在哪；产出 `ChunkObjectSaveData`，不碰 IO 与 Instantiate）
   - `ChunkStorager.cs`：**存储层**（磁盘 IO；当前 JSON 原型；支持异步合并写入）
 - `Assets/ChunkBaseGame/ChunkTest/Test/`
   - `Debugger/ShowChunkDebugger.cs`：调试面板（Chunks、FPS、CPU 等）
@@ -34,15 +34,16 @@
 
 ### 1) Config：所有可调参数只放配置
 `ChunkConfig -> ChunkSettings` 是唯一配置来源。  
-Manager/Generator/Storager 都只读 `ChunkSettings`，避免散落的 Inspector 字段导致配置漂移。
+Manager、Generator 与 Storager 都只读 `ChunkSettings`，避免散落的 Inspector 字段导致配置漂移。
 
-### 2) Manager：只做“区块生命周期调度”
+### 2) Manager：区块调度 + 内容加载/卸载管线
 `ChunkManager` 负责：
 - 根据玩家位置计算窗口（方形/圆形）
 - 加载缺失 chunk、卸载离开窗口的 chunk
 - 维护 `Dictionary<long, ChunkData>` 缓存
+- 读档 / 无档时调用 `ChunkGenerator` 得到数据 / 异步写盘 / 实例化 prefab / 卸载时写回 DTO 再保存 / 销毁场景根节点
 
-它不应该关心“怎么生成地形、怎么存档、怎么渲染”。
+**不**在 Manager 里写具体地形算法；算法只在 `ChunkGenerator`。
 
 ### 3) Data：运行时数据与存档数据分离（以 `ChunkData` 为核心）
 `ChunkData` 是区块的**运行时聚合体**：它把“身份、边界、状态、运行时托管对象、存档 DTO”聚在一起供 Manager 缓存与调度，但会刻意区分哪些是**身份/派生数据**，哪些是**运行时引用**，哪些是**可落盘数据**。
@@ -52,9 +53,9 @@ Manager/Generator/Storager 都只读 `ChunkSettings`，避免散落的 Inspector
   - `Id` 是哈希身份（用于 `Dictionary` key 与存档索引），由 `Coord` 位运算派生得到（`Id => Coord.Id`），避免出现“坐标改了但 ID 没更新”的一致性问题。
 - **边界：`Bounds` 是由 `Coord + Settings` 推导的派生数据**
   - 边界不是区块身份，属于可计算结果；分离后更利于扩展不同高度范围/不同维度等。
-- **运行时托管：实体集合对外只读，修改走受控入口**
-  - `Entities` 暴露为 `IReadOnlyCollection<Transform>`：允许外部遍历/统计/调试，但不允许绕过区块规则随意 `Add/Remove/Clear`。
-  - 对集合的变更统一通过 `OnEnterChunk / OnExitChunk / DetachAllEntities`，便于在“进入/离开/卸载”时集中维护不变式（例如去重、判空、批量迁移、后续扩展事件/父节点约束等）。
+- **运行时实例：`SpawnedInstances` 与存档 `spawns` 一一对应**
+  - 当前原型用 `List<Transform>` 与 `ObjectSaveData.spawns[i]` 对齐，便于卸载时回写格点坐标；不再维护第二套 `HashSet` 以免双写漂移。
+  - 若未来需要“动态进出 chunk 的实体”（与 spawns 索引无关），再单独引入托管集合或事件流，而不是在原型阶段重复维护两份引用容器。
 - **存档 DTO：单独的 `[Serializable]` 数据结构**
   - 运行时的 `Transform`、集合引用、状态等不适合作为跨会话持久化数据；存档只保留“可重建”的最小信息（如 `chunkId`、`prefabIndex`、整数格点 `(x,y,z)`），从而让运行时结构可以自由演进而不绑死存档格式。
 - **局部坐标：用 Chunk Local 作为“区块内地址”**
@@ -62,12 +63,10 @@ Manager/Generator/Storager 都只读 `ChunkSettings`，避免散落的 Inspector
   - 推荐约定：`localX/localZ ∈ [0, Size-1]`，`localY = worldY - MinY`（使局部 Y 从 0 开始，数组更紧凑）。
   - World ↔ Local 的换算统一通过 `ChunkBounds.MinX/MinY/MinZ` 做偏移（见 `ChunkUtil.WorldToLocal/LocalToWorld`），避免各处自己算导致 off-by-one。
 
-### 3) Generator：内容生成与运行时表现（当前 prefab 验证）
-当前阶段用 prefab 做方块的可见性验证：
-- 生成：用高度图（PerlinNoise）决定每个 `(x,z)` 的高度柱
-- 表达：每个方块占 1 格，存档用 `(x,y,z)` 整数格点（避免浮点误差）
-- 实例化：把数据还原为 prefab 实例
-- 卸载：回写实例坐标并保存
+### 3) Generator：只负责「生成数据」（`ChunkGenerator`，当前 prefab 占位验证）
+- 输出 `ChunkObjectSaveData`：`prefabIndex` + chunk-local `(x,y,z)`
+- 当前实现：Perlin 高度图 + 每列竖条占位（**不**读盘、不 Instantiate）
+- 实例化与回写存档由 `ChunkManager` + `ChunkStorager` 完成
 
 > 注意：这只是验证管线的临时手段，性能无法支撑 MC 规模（见下文“注意事项/瓶颈”）。
 
@@ -76,23 +75,20 @@ Manager/Generator/Storager 都只读 `ChunkSettings`，避免散落的 Inspector
 - `TryLoadChunkObjects(chunkId, settings, out data)`
 - `SaveChunkObjects(data, settings)`
 
-后续切换为二进制/Region 文件/多世界目录时，只需要改 Storager；`ChunkManager/ChunkGenerator` 的职责不变。
+后续切换为二进制/Region 文件/多世界目录时，只需要改 Storager；换地形/内容规则时主要改 `ChunkGenerator.GenerateChunkObjectSaveData` 及其分支。
 
 ---
 
 ## 当前原型的“可运行闭环”
 
 1. 玩家进入窗口 → `ChunkManager.LoadChunk` 创建 `ChunkData`
-2. `ChunkGenerator.OnChunkLoaded`：
-   - 尝试从 `TempData` 读取 `chunk_<id>.json`
-   - 若无则按 `worldSeed + noiseSmoothness` 生成高度图数据并写盘
-   - 将存档数据实例化为 prefab（方块）
+2. `ChunkManager.LoadChunkContent`：
+   - `ChunkStorager.TryLoadChunkObjects`；若无则 `ChunkGenerator.GenerateChunkObjectSaveData` 再异步写盘
+   - 按 `spawns` 实例化 prefab
 3. 玩家离开窗口 → `ChunkManager.UnloadChunk`
-4. `ChunkGenerator.OnChunkUnloading`：
-   - 通过区块的受控入口批量解绑运行时托管对象（导出并清空集合，交由卸载流程处理）
-   - 回写 Transform → 整数格点 `(x,y,z)` 到存档数据（保证落盘是确定的、无浮点误差）
-   - 写盘保存（仅保存 DTO，不序列化运行时引用）
-   - 销毁该 chunk 的根节点（释放实例）
+4. `ChunkManager.UnloadChunkContent`：
+   - 将 Transform 写回 `spawns` 的 chunk-local 格点，有变化则异步保存
+   - 清空 `SpawnedInstances`，销毁 chunk 对象根节点
 
 ---
 
