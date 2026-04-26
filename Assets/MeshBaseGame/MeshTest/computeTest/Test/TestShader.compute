@@ -1,0 +1,28 @@
+// 1. 定义内核函数名称
+#pragma kernel CSMain
+
+// 2. 声明缓冲区
+// StructuredBuffer: 只读缓冲区（输入）
+StructuredBuffer<float> InputBuffer;
+
+// RWStructuredBuffer: 可读写缓冲区（输出）
+RWStructuredBuffer<float> OutputBuffer;
+
+// 声明一个变量接收数组长度，防止越界
+int Count;
+
+// 3. 定义线程组大小
+// [numthreads(x, y, z)] 定义每个线程组包含的线程数
+// 通常设为 64 或 128 的倍数效果较好
+[numthreads(64, 1, 1)]
+void CSMain (uint3 id : SV_DispatchThreadID)
+{
+    // id.x 是当前线程的全局 ID，相当于数组的下标
+    // 注意：id.x 是 uint，Count 是 int。显式处理避免 signed/unsigned mismatch 警告。
+    if (Count <= 0) return;
+    if (id.x >= (uint)Count) return; // 安全检查：防止超出数组范围
+
+    // 核心逻辑：读取输入，乘以2，写入输出
+    float val = InputBuffer[id.x];
+    OutputBuffer[id.x] = val * 2.0;
+}

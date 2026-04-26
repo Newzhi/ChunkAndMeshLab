@@ -1,0 +1,49 @@
+// Each #kernel tells which function to compile; you can have many kernels
+#pragma kernel Editable
+
+static const int numThreads = 8;
+
+RWStructuredBuffer<float4> points;
+int numPointsPerAxis;
+float3 center;
+float cubeSize;
+float isoLevel;
+
+int indexFromCoord(uint x, uint y, uint z) 
+{
+    return z * numPointsPerAxis * numPointsPerAxis + y * numPointsPerAxis + x;
+}
+
+float4 penPosAndSize;
+float3 penNormal;
+
+[numthreads(numThreads,numThreads,numThreads)]
+void Editable (int3 id : SV_DispatchThreadID)
+{
+    if (id.x >= numPointsPerAxis || id.y >= numPointsPerAxis || id.z >= numPointsPerAxis) 
+    {
+        return;
+    }
+
+    int index = indexFromCoord(id.x,id.y,id.z);
+    float3 pos = points[index].xyz;
+    float value = points[index].w;
+
+    float dis = distance(pos, penPosAndSize.xyz);
+    float dir = normalize(penPosAndSize.xyz - pos);
+    float penWeight = saturate(dot(dir, penNormal));
+
+    if(dis < penPosAndSize.w)
+    {
+        if(dis > penPosAndSize.w * 0.95 && penWeight > 0.8)
+        {
+            value = min(value, isoLevel - 0.01f);
+        }
+        else
+        {
+            value = isoLevel + 0.01f;
+        }
+    }
+
+    points[index] = float4(pos, value);
+}
