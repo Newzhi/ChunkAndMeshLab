@@ -23,7 +23,10 @@ public static class ChunkGenerator
             return;
         }
 
-        EnsureChunkObjectRoot(chunk, settings);
+        if (!settings.UseGpuInstancingForChunkObjects)
+        {
+            EnsureChunkObjectRoot(chunk, settings);
+        }
 
         if (!ChunkStorager.TryLoadChunkObjects(chunk.Id, settings, out ChunkObjectSaveData data))
         {
@@ -36,6 +39,13 @@ public static class ChunkGenerator
 
         chunk.ObjectSaveData = data;
         chunk.SpawnedInstances.Clear();
+
+        if (settings.UseGpuInstancingForChunkObjects)
+        {
+            chunk.GpuInstanceMatricesByPrefabIndex = BuildGpuInstanceMatrices(chunk, data, prefabs);
+            EnsureChunkCollision(chunk, data, settings);
+            return;
+        }
 
         if (data.spawns == null)
         {
@@ -76,7 +86,9 @@ public static class ChunkGenerator
             return;
         }
 
-        if (chunk.ObjectSaveData != null && chunk.ObjectSaveData.spawns != null)
+        if (!settings.UseGpuInstancingForChunkObjects
+            && chunk.ObjectSaveData != null
+            && chunk.ObjectSaveData.spawns != null)
         {
             // 回写：把运行时 transform 的位置/旋转写回 chunk-local 数据（若实例数量对齐）。
             int count = Mathf.Min(chunk.ObjectSaveData.spawns.Count, chunk.SpawnedInstances.Count);
@@ -105,10 +117,52 @@ public static class ChunkGenerator
             }
         }
 
+        chunk.GpuInstanceMatricesByPrefabIndex = null;
         chunk.SpawnedInstances.Clear();
         chunk.DetachAllEntities();
 
+        DestroyChunkCollisionRoot(chunk);
         DestroyChunkObjectRoot(chunk);
+    }
+
+    #endregion
+
+    #region GPU Instancing（按 prefab 分组矩阵）
+
+    private static Dictionary<int, List<Matrix4x4>> BuildGpuInstanceMatrices(ChunkData chunk, ChunkObjectSaveData data, GameObject[] prefabs)
+    {
+        if (chunk == null || data == null || data.spawns == null || data.spawns.Count == 0)
+        {
+            return null;
+        }
+
+        Vector3 worldOrigin = new Vector3(chunk.Bounds.MinX, chunk.Bounds.MinY, chunk.Bounds.MinZ);
+        Dictionary<int, List<Matrix4x4>> dict = new Dictionary<int, List<Matrix4x4>>();
+
+        for (int i = 0; i < data.spawns.Count; i++)
+        {
+            ChunkSpawnData s = data.spawns[i];
+            if ((uint)s.prefabIndex >= (uint)prefabs.Length)
+            {
+                continue;
+            }
+
+            if (prefabs[s.prefabIndex] == null)
+            {
+                continue;
+            }
+
+            if (!dict.TryGetValue(s.prefabIndex, out List<Matrix4x4> list))
+            {
+                list = new List<Matrix4x4>(256);
+                dict[s.prefabIndex] = list;
+            }
+
+            Vector3 pos = worldOrigin + new Vector3(s.x, s.y, s.z);
+            list.Add(Matrix4x4.TRS(pos, Quaternion.identity, Vector3.one));
+        }
+
+        return dict.Count == 0 ? null : dict;
     }
 
     #endregion
@@ -180,6 +234,70 @@ public static class ChunkGenerator
         }
 
         return data;
+    }
+
+    #endregion
+
+    #region Chunk Collision（GPU 路径：合并 MeshCollider）
+
+    private static void EnsureChunkCollision(ChunkData chunk, ChunkObjectSaveData data, ChunkSettings settings)
+    {
+        DestroyChunkCollisionRoot(chunk);
+
+        if (data?.spawns == null || data.spawns.Count == 0)
+        {
+            return;
+        }
+
+        var occupied = new HashSet<Vector3Int>();
+        for (int i = 0; i < data.spawns.Count; i++)
+        {
+            ChunkSpawnData s = data.spawns[i];
+            occupied.Add(new Vector3Int(s.x, s.y, s.z));
+        }
+
+        int sizeXZ = Mathf.Max(1, chunk.Bounds.Size);
+        int heightY = Mathf.Max(1, chunk.Bounds.MaxYInclusive - chunk.Bounds.MinY + 1);
+        Mesh mesh = ChunkCollisionMeshBuilder.Build(occupied, sizeXZ, heightY);
+        if (mesh.vertexCount == 0)
+        {
+            UnityEngine.Object.Destroy(mesh);
+            return;
+        }
+
+        Transform parent = settings.ChunkObjectParent;
+        GameObject go = new GameObject($"ChunkCollision ({chunk.Coord.X}, {chunk.Coord.Z})");
+        go.transform.SetParent(parent, worldPositionStays: false);
+        go.transform.SetPositionAndRotation(
+            new Vector3(chunk.Bounds.MinX, chunk.Bounds.MinY, chunk.Bounds.MinZ),
+            Quaternion.identity);
+
+        MeshFilter mf = go.AddComponent<MeshFilter>();
+        MeshCollider mc = go.AddComponent<MeshCollider>();
+        mf.sharedMesh = mesh;
+        mc.sharedMesh = mesh;
+        mc.convex = false;
+
+        chunk.ChunkCollisionRoot = go;
+    }
+
+    private static void DestroyChunkCollisionRoot(ChunkData chunk)
+    {
+        if (chunk == null || chunk.ChunkCollisionRoot == null)
+        {
+            return;
+        }
+
+        GameObject go = chunk.ChunkCollisionRoot;
+        chunk.ChunkCollisionRoot = null;
+
+        MeshFilter mf = go.GetComponent<MeshFilter>();
+        Mesh mesh = mf != null ? mf.sharedMesh : null;
+        UnityEngine.Object.Destroy(go);
+        if (mesh != null)
+        {
+            UnityEngine.Object.Destroy(mesh);
+        }
     }
 
     #endregion

@@ -27,20 +27,22 @@ public readonly struct ChunkSettings
     public GameObject[] SpawnPrefabs { get; }
     public Transform ChunkObjectParent { get; }
     public bool EnableChunkObjectDiskCache { get; }
+    // true：不 Instantiate 方块，由 ChunkGpuInstancedRenderer 用 DrawMeshInstanced 绘制（材质需开启 GPU Instancing）。
+    public bool UseGpuInstancingForChunkObjects { get; }
     public string TempDataFolderUnderAssets { get; }
 
     public ChunkSettings(int size, int minY, int maxYInclusive)
-        : this(size, minY, maxYInclusive, 3, true, 0, 32f, true, Color.green, true, null, null, true, "ChunkTest/TempData")
+        : this(size, minY, maxYInclusive, 3, true, 0, 32f, true, Color.green, true, null, null, true, true, "ChunkTest/TempData")
     {
     }
 
     public ChunkSettings(int size, int minY, int maxYInclusive, int maxRenderDistance)
-        : this(size, minY, maxYInclusive, maxRenderDistance, true, 0, 32f, true, Color.green, true, null, null, true, "ChunkTest/TempData")
+        : this(size, minY, maxYInclusive, maxRenderDistance, true, 0, 32f, true, Color.green, true, null, null, true, true, "ChunkTest/TempData")
     {
     }
 
     public ChunkSettings(int size, int minY, int maxYInclusive, int maxRenderDistance, bool useCircularRange)
-        : this(size, minY, maxYInclusive, maxRenderDistance, useCircularRange, 0, 32f, true, Color.green, true, null, null, true, "ChunkTest/TempData")
+        : this(size, minY, maxYInclusive, maxRenderDistance, useCircularRange, 0, 32f, true, Color.green, true, null, null, true, true, "ChunkTest/TempData")
     {
     }
 
@@ -58,6 +60,7 @@ public readonly struct ChunkSettings
         GameObject[] spawnPrefabs,
         Transform chunkObjectParent,
         bool enableChunkObjectDiskCache,
+        bool useGpuInstancingForChunkObjects,
         string tempDataFolderUnderAssets)
     {
         Size = size;
@@ -76,6 +79,7 @@ public readonly struct ChunkSettings
         SpawnPrefabs = spawnPrefabs;
         ChunkObjectParent = chunkObjectParent;
         EnableChunkObjectDiskCache = enableChunkObjectDiskCache;
+        UseGpuInstancingForChunkObjects = useGpuInstancingForChunkObjects;
         TempDataFolderUnderAssets = tempDataFolderUnderAssets ?? "ChunkTest/TempData";
     }
 }
@@ -100,6 +104,7 @@ public class ChunkConfig : MonoBehaviour
     [SerializeField] private GameObject[] spawnPrefabs;
     [SerializeField] private Transform chunkObjectParent;
     [SerializeField] private bool enableChunkObjectDiskCache = true;
+    [SerializeField] private bool useGpuInstancingForChunkObjects = true;
     [SerializeField] private string tempDataFolderUnderAssets = "ChunkTest/TempData";
 
     [Header("Debug Visualization")]
@@ -134,6 +139,7 @@ public class ChunkConfig : MonoBehaviour
             spawnPrefabs,
             chunkObjectParent,
             enableChunkObjectDiskCache,
+            useGpuInstancingForChunkObjects,
             tempDataFolderUnderAssets);
     }
 }

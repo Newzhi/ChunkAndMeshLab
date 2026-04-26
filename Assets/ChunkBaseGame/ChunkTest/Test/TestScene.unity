@@ -285,6 +285,7 @@ GameObject:
   - component: {fileID: 23043302}
   - component: {fileID: 23043301}
   - component: {fileID: 23043303}
+  - component: {fileID: 23043304}
   m_Layer: 0
   m_Name: ChunkManager
   m_TagString: Untagged
@@ -344,10 +345,24 @@ MonoBehaviour:
   - {fileID: 3795224619834987707, guid: fa93324a8a489f545aba44b97790b096, type: 3}
   chunkObjectParent: {fileID: 22440688}
   enableChunkObjectDiskCache: 1
+  useGpuInstancingForChunkObjects: 1
   tempDataFolderUnderAssets: ChunkBaseGame/ChunkTest/TempData
   drawActiveChunkWireframe: 1
   activeChunkWireColor: {r: 0, g: 1, b: 0, a: 1}
   logPlayerEnterChunk: 1
+--- !u!114 &23043304
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 23043300}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: b91e4c2f7d3a4219e8f6b0a5c4d12e90, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  chunkManager: {fileID: 23043301}
 --- !u!1 &132056886
 GameObject:
   m_ObjectHideFlags: 0
@@ -451,7 +466,7 @@ Transform:
   m_GameObject: {fileID: 132056886}
   serializedVersion: 2
   m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
-  m_LocalPosition: {x: 0, y: 25.5, z: 0}
+  m_LocalPosition: {x: 0, y: 35.65, z: 0}
   m_LocalScale: {x: 1.2, y: 1.2, z: 1.2}
   m_ConstrainProportionsScale: 1
   m_Children: []

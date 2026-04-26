@@ -41,6 +41,9 @@ public class ChunkManager : MonoBehaviour
     // 对外只读暴露缓存，避免外部直接改写字典。
     public IReadOnlyDictionary<long, ChunkData> Chunks => chunks;
 
+    // 供渲染等系统读取当前区块配置（Awake 中已从 ChunkConfig 刷新）。
+    public ChunkSettings Settings => settings;
+
     #endregion
 
     #endregion

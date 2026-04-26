@@ -126,6 +126,12 @@ public sealed class ChunkData
     // 运行时实例列表：索引与 ObjectSaveData.spawns 一一对应（用于卸载时回写位置/旋转）。
     public readonly List<Transform> SpawnedInstances = new List<Transform>();
 
+    // GPU Instancing：按 spawnPrefabs 下标分组的实例矩阵（UseGpuInstancingForChunkObjects 时使用；无 GameObject 实体）。
+    public Dictionary<int, List<Matrix4x4>> GpuInstanceMatricesByPrefabIndex { get; set; }
+
+    // GPU 路径：每区块一个合并 MeshCollider（由 spawns 体素外壳生成）；Prefab 路径为 null。
+    public GameObject ChunkCollisionRoot { get; set; }
+
     #endregion
 
     #region 定义 — 实体集合（运行时托管）
