@@ -1,5 +1,3 @@
-using System.Collections;
-using System.Collections.Generic;
 using UnityEngine;
 
 [RequireComponent(typeof(MeshFilter), typeof(MeshRenderer))]
@@ -7,161 +5,104 @@ public class SimpleProceduralMesh : MonoBehaviour
 {
     [Header("setting")]
     public Vector3[] verts;
-    public int[]  triangles;
+    public int[] triangles;
     public Vector3[] normals;
+    public Vector2[] uvs;
 
-    [Header("cube")]
-    [SerializeField] private bool buildCubeOnStart = true;
-    [SerializeField] private Vector3 cubeSize = Vector3.one;
-    
+    [Header("quad")]
+    [SerializeField] private Vector2 quadSize = Vector2.one;
+
     public Mesh mesh;
 
     #region 生命事件函数
 
-    void Start()
+    /// <summary>
+    /// Unity 调用顺序为 Awake → OnEnable → Start。若在 OnEnable 里调用 DrawMesh，
+    /// 必须先已通过 BuildQuad 写好 verts/triangles，否则会绘制空数据。
+    /// </summary>
+    private void OnEnable()
     {
-        mesh = new Mesh() { name = "Mesh" };
-        if (buildCubeOnStart)
-        {
-            BuildCube(cubeSize);
-        }
+        EnsureMesh();
+        BuildQuad(quadSize);
         DrawMesh();
     }
 
-    // Update is called once per frame
-    void Update()
+    private void Start()
     {
         
     }
 
+    private void Update()
+    {
+    }
+
+    private void OnDestroy()
+    {
+        if (mesh != null)
+        {
+            Destroy(mesh);
+            mesh = null;
+        }
+    }
+
     #endregion
-    
-    #region 
-    
-    private void DrawMesh()
+
+    private void EnsureMesh()
     {
         if (mesh == null)
         {
-            mesh = new Mesh() { name = "Mesh" };
+            mesh = new Mesh { name = "SimpleQuadMesh" };
         }
+    }
+
+    private void DrawMesh()
+    {
+        EnsureMesh();
+        if (verts == null || triangles == null || uvs == null) return;
 
         mesh.Clear();
         mesh.vertices = verts;
         mesh.triangles = triangles;
+        mesh.uv = uvs;
 
-        if (normals != null && normals.Length == verts.Length)
-        {
-            mesh.normals = normals;
-        }
-        else
-        {
-            mesh.RecalculateNormals();
-        }
-
+        mesh.RecalculateNormals();
+        mesh.RecalculateTangents();
         mesh.RecalculateBounds();
 
-        GetComponent<MeshFilter>().mesh = mesh;
+        normals = mesh.normals;
+
+        var mf = GetComponent<MeshFilter>();
+        mf.mesh = mesh;
     }
 
-    private void BuildCube(Vector3 size)
+    /// <summary>
+    /// XY 平面上的矩形面片，居中于原点；正面朝向 +Z（Unity 默认剔除背面）。
+    /// UV：(0,0)-(1,1) 铺满四角。
+    /// </summary>
+    private void BuildQuad(Vector2 size)
     {
-        float hx = size.x * 0.5f;
-        float hy = size.y * 0.5f;
-        float hz = size.z * 0.5f;
-
-        // 24 vertices (4 per face) so the cube keeps hard edges under lighting.
-        verts = new Vector3[]
-        {
-            // +Z (front)
-            new Vector3(-hx, -hy,  hz),
-            new Vector3( hx, -hy,  hz),
-            new Vector3( hx,  hy,  hz),
-            new Vector3(-hx,  hy,  hz),
-
-            // -Z (back)
-            new Vector3( hx, -hy, -hz),
-            new Vector3(-hx, -hy, -hz),
-            new Vector3(-hx,  hy, -hz),
-            new Vector3( hx,  hy, -hz),
-
-            // +X (right)
-            new Vector3( hx, -hy,  hz),
-            new Vector3( hx, -hy, -hz),
-            new Vector3( hx,  hy, -hz),
-            new Vector3( hx,  hy,  hz),
-
-            // -X (left)
-            new Vector3(-hx, -hy, -hz),
-            new Vector3(-hx, -hy,  hz),
-            new Vector3(-hx,  hy,  hz),
-            new Vector3(-hx,  hy, -hz),
-
-            // +Y (top)
-            new Vector3(-hx,  hy,  hz),
-            new Vector3( hx,  hy,  hz),
-            new Vector3( hx,  hy, -hz),
-            new Vector3(-hx,  hy, -hz),
-
-            // -Y (bottom)
-            new Vector3(-hx, -hy, -hz),
-            new Vector3( hx, -hy, -hz),
-            new Vector3( hx, -hy,  hz),
-            new Vector3(-hx, -hy,  hz),
+        mesh.vertices = new Vector3[] {
+            Vector3.zero, Vector3.right, Vector3.up, new Vector3(1f, 1f)
+            //new Vector3(1.1f, 0f), new Vector3(0f, 1.1f), new Vector3(1.1f, 1.1f)
         };
 
-        triangles = new int[]
-        {
-            // front (+Z)
-            0, 1, 2,
-            0, 2, 3,
-
-            // back (-Z)
-            4, 5, 6,
-            4, 6, 7,
-
-            // right (+X)
-            8, 9, 10,
-            8, 10, 11,
-
-            // left (-X)
-            12, 13, 14,
-            12, 14, 15,
-
-            // top (+Y)
-            16, 17, 18,
-            16, 18, 19,
-
-            // bottom (-Y)
-            20, 21, 22,
-            20, 22, 23,
+        mesh.normals = new Vector3[] {
+            Vector3.back, Vector3.back, Vector3.back, Vector3.back
+            //Vector3.back, Vector3.back, Vector3.back,
         };
 
-        normals = new Vector3[]
-        {
-            // front
-            Vector3.forward, Vector3.forward, Vector3.forward, Vector3.forward,
-            // back
-            Vector3.back, Vector3.back, Vector3.back, Vector3.back,
-            // right
-            Vector3.right, Vector3.right, Vector3.right, Vector3.right,
-            // left
-            Vector3.left, Vector3.left, Vector3.left, Vector3.left,
-            // top
-            Vector3.up, Vector3.up, Vector3.up, Vector3.up,
-            // bottom
-            Vector3.down, Vector3.down, Vector3.down, Vector3.down,
+        mesh.triangles = new int[] {
+            0, 2, 1, 1, 2, 3
+        };
+
+        mesh.uv = new Vector2[] {
+            Vector2.zero, Vector2.right, Vector2.up, Vector2.one
+            //Vector2.right, Vector2.up, Vector2.one
         };
     }
-    
-    #endregion
-    
+
     #region 调试方法
 
-    private void OnDrawGizmos()
-    {
-        //Debug.Log("OnDrawGizmos");
-    }
-    
     #endregion
-
 }
+
