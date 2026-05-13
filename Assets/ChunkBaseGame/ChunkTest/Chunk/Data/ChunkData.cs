@@ -152,6 +152,9 @@ public class ChunkObjectSaveData
 {
     public long chunkId;
     public List<ChunkSpawnData> spawns;
+
+    /// <summary>实验：地形高度图，行主序 z 后 x，长度 (chunkSize+1)²，值为相对 chunk 原点 Y 的偏移。</summary>
+    public List<float> terrainHeights;
 }
 
 [Serializable]

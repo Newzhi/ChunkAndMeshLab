@@ -6,16 +6,16 @@ using BaseFramework.Async;
 using Cysharp.Threading.Tasks;
 using UnityEngine;
 
-// 职责：区块对象数据的持久化（TempData 下的 JSON 读写）。
-// 目标：把“存储”从生成/实例化逻辑中解耦出来，便于后续切换为二进制/Region 文件/多世界目录等。
-public static class ChunkStorager
+// 默认存储策略：TempData 下 JSON 文件 + 异步合并写入。
+// 通过实现 <see cref="IChunkObjectStorager"/> 供 ChunkManager 组合注入；换 Region/二进制时新增类型即可。
+[Serializable]
+public sealed class JsonChunkObjectStorager : IChunkObjectStorager
 {
-    // 异步保存：把短时间内重复保存合并（chunkId 最后一次覆盖前一次）。
-    private static readonly ConcurrentDictionary<long, PendingSave> pendingSaves = new ConcurrentDictionary<long, PendingSave>();
-    private static readonly AsyncAutoResetEventLite saveSignal = new AsyncAutoResetEventLite(initialState: false);
-    private static int workerStarted;
+    private readonly ConcurrentDictionary<long, PendingSave> pendingSaves = new ConcurrentDictionary<long, PendingSave>();
+    private readonly AsyncAutoResetEventLite saveSignal = new AsyncAutoResetEventLite(initialState: false);
+    private int workerStarted;
 
-    public static bool TryLoadChunkObjects(long chunkId, ChunkSettings settings, out ChunkObjectSaveData data)
+    public bool TryLoad(long chunkId, ChunkSettings settings, out ChunkObjectSaveData data)
     {
         data = null;
 
@@ -38,13 +38,13 @@ public static class ChunkStorager
         }
         catch (Exception ex)
         {
-            Debug.LogError($"[ChunkStorager] 读取 chunk 对象失败 chunkId={chunkId} err={ex}");
+            Debug.LogError($"[JsonChunkObjectStorager] 读取 chunk 对象失败 chunkId={chunkId} err={ex}");
             data = null;
             return false;
         }
     }
 
-    public static bool SaveChunkObjects(ChunkObjectSaveData data, ChunkSettings settings)
+    public bool Save(ChunkObjectSaveData data, ChunkSettings settings)
     {
         if (!settings.EnableChunkObjectDiskCache || data == null)
         {
@@ -62,13 +62,12 @@ public static class ChunkStorager
         }
         catch (Exception ex)
         {
-            Debug.LogError($"[ChunkStorager] 保存 chunk 对象失败 chunkId={data.chunkId} err={ex}");
+            Debug.LogError($"[JsonChunkObjectStorager] 保存 chunk 对象失败 chunkId={data.chunkId} err={ex}");
             return false;
         }
     }
 
-    // 异步保存：仅负责将请求加入队列并唤醒写线程；写盘在后台进行。
-    public static void SaveChunkObjectsAsync(ChunkObjectSaveData data, ChunkSettings settings)
+    public void SaveAsync(ChunkObjectSaveData data, ChunkSettings settings)
     {
         if (!settings.EnableChunkObjectDiskCache || data == null)
         {
@@ -77,7 +76,6 @@ public static class ChunkStorager
 
         EnsureWorkerStarted();
 
-        // 注意：这里直接序列化成 JSON，确保后台写入阶段不依赖 Unity API。
         string dir = GetTempDataAbsolutePath(settings);
         string path = GetChunkObjectFilePath(data.chunkId, settings);
         string json = JsonUtility.ToJson(data, prettyPrint: true);
@@ -86,18 +84,17 @@ public static class ChunkStorager
         saveSignal.Set();
     }
 
-    private static void EnsureWorkerStarted()
+    private void EnsureWorkerStarted()
     {
         if (Interlocked.CompareExchange(ref workerStarted, 1, 0) != 0)
         {
             return;
         }
 
-        // fire-and-forget：后台循环永不退出
         SaveWorkerLoop().Forget();
     }
 
-    private static async UniTaskVoid SaveWorkerLoop()
+    private async UniTaskVoid SaveWorkerLoop()
     {
         while (true)
         {
@@ -105,8 +102,6 @@ public static class ChunkStorager
             {
                 await saveSignal.WaitAsync();
 
-                // 批量取出当前所有 pending，减少频繁唤醒/抖动。
-                // 写盘放到线程池，避免阻塞 PlayerLoop。
                 await UniTask.RunOnThreadPool(() =>
                 {
                     foreach (var kv in pendingSaves)
@@ -124,8 +119,7 @@ public static class ChunkStorager
             }
             catch (Exception ex)
             {
-                // 后台线程：这里只能记录错误，避免线程退出导致后续保存永久丢失。
-                Debug.LogError($"[ChunkStorager] 异步保存线程异常 err={ex}");
+                Debug.LogError($"[JsonChunkObjectStorager] 异步保存线程异常 err={ex}");
             }
         }
     }
@@ -156,4 +150,3 @@ public static class ChunkStorager
         }
     }
 }
-

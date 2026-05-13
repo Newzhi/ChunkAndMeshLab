@@ -1,11 +1,10 @@
 using System.Collections.Generic;
 using UnityEngine;
 
-// 职责：区块生命周期与内容管线调度。
+// 职责：区块生命周期与窗口调度。
 // - 调度：窗口、Load/Unload、维护 ChunkData 缓存。
-// - 内容：读档 → 无则调用 ChunkGenerator 生成数据 → 写盘；实例化/销毁；卸载时把 Transform 写回 DTO 再按需保存。
-// ChunkGenerator 只负责「生成什么、怎么生成、生成在哪」（产出 ChunkObjectSaveData），不碰 IO 与场景对象。
-public class ChunkManager : MonoBehaviour
+// - 内容：委托 <see cref="IChunkObjectGenerator"/>（内部自行编排 storager、生成、实例化与卸载回写）；本类不实现具体生成逻辑。
+public class ChunkManager : MonoBehaviour, IChunkManager
 {
     #region 定义
 
@@ -16,6 +15,16 @@ public class ChunkManager : MonoBehaviour
 
     [Header("Player Center")]
     [SerializeField] private Transform player;
+
+    [Header("Content Strategies (可选覆盖)")]
+    [Tooltip("为空则使用默认 HeightColumnChunkObjectGenerator。地形实验选 MeshNoiseTerrainChunkGenerator。")]
+    [SerializeReference]
+    private IChunkObjectGenerator chunkObjectGenerator;
+
+    [Header("Storage Strategy (可选覆盖)")]
+    [Tooltip("为空则使用 JsonChunkObjectStorager。地形高度图实验选 JsonHeightmapTerrainChunkStorager（chunk_*_terrain.json）。")]
+    [SerializeReference]
+    private IChunkObjectStorager chunkObjectStorager;
 
     #endregion
 
@@ -47,7 +56,21 @@ public class ChunkManager : MonoBehaviour
     private void Awake()
     {
         RefreshSettings();
+        EnsureContentStrategies();
         InitPlayerReference();
+    }
+
+    private void EnsureContentStrategies()
+    {
+        if (chunkObjectGenerator is null)
+        {
+            chunkObjectGenerator = new MeshNoiseTerrainChunkGenerator();
+        }
+
+        if (chunkObjectStorager is null)
+        {
+            chunkObjectStorager = new JsonHeightmapTerrainChunkStorager();
+        }
     }
 
     private void Start()
@@ -62,7 +85,7 @@ public class ChunkManager : MonoBehaviour
 
     #endregion
 
-    #region 基本操作
+    #region IChunkManager
 
     public ChunkData LoadChunk(ChunkCoord coord)
     {
@@ -93,19 +116,21 @@ public class ChunkManager : MonoBehaviour
         return chunks.Remove(id);
     }
 
+    public bool TryGetChunk(long chunkId, out ChunkData chunk) => chunks.TryGetValue(chunkId, out chunk);
+
     #endregion
 
-    #region 根据玩家位置加载区块
+    #region 区块加载策略
 
     private void InitPlayerReference()
     {
-        if (player != null)
+        if (player is not null)
         {
             return;
         }
 
         GameObject playerObj = GameObject.FindWithTag("Player");
-        if (playerObj != null)
+        if (playerObj is not null)
         {
             player = playerObj.transform;
         }
@@ -113,7 +138,7 @@ public class ChunkManager : MonoBehaviour
 
     private void RefreshSettings()
     {
-        if (chunkConfig == null)
+        if (chunkConfig is null)
         {
             Debug.LogError("[ChunkManager] 必须绑定 ChunkConfig，当前已禁用 ChunkManager。");
             enabled = false;
@@ -125,7 +150,7 @@ public class ChunkManager : MonoBehaviour
 
     private void RefreshChunksAroundPlayer(bool force)
     {
-        if (player == null)
+        if (player is null)
         {
             return;
         }
@@ -185,134 +210,16 @@ public class ChunkManager : MonoBehaviour
 
     #endregion
 
-    #region 区块内容（读档 · 生成 · 写盘 · 实例化 · 回写）
+    #region 区块内容（委托生成器）
 
     private void LoadChunkContent(ChunkData chunk)
     {
-        if (chunk == null)
-        {
-            return;
-        }
-
-        GameObject[] prefabs = settings.SpawnPrefabs;
-        if (prefabs == null || prefabs.Length == 0)
-        {
-            return;
-        }
-
-        EnsureChunkObjectRoot(chunk);//确保挂载根节点正确以及设置根节点
-
-        ChunkObjectSaveData data;
-        if (!ChunkStorager.TryLoadChunkObjects(chunk.Id, settings, out data))
-        {
-            data = ChunkGenerator.GenerateChunkObjectSaveData(chunk, settings);
-            if (data != null)
-            {
-                ChunkStorager.SaveChunkObjectsAsync(data, settings);
-            }
-        }
-
-        chunk.ObjectSaveData = data;
-        chunk.SpawnedInstances.Clear();
-
-        if (data == null || data.spawns == null)
-        {
-            return;
-        }
-
-        Vector3 worldOrigin = new Vector3(chunk.Bounds.MinX, chunk.Bounds.MinY, chunk.Bounds.MinZ);
-        for (int i = 0; i < data.spawns.Count; i++)
-        {
-            ChunkSpawnData s = data.spawns[i];
-            if ((uint)s.prefabIndex >= (uint)prefabs.Length)
-            {
-                chunk.SpawnedInstances.Add(null);
-                continue;
-            }
-
-            GameObject prefab = prefabs[s.prefabIndex];
-            if (prefab == null)
-            {
-                chunk.SpawnedInstances.Add(null);
-                continue;
-            }
-
-            GameObject go = Object.Instantiate(prefab, chunk.ObjectRoot);
-            go.name = $"{prefab.name} ({chunk.Coord.X},{chunk.Coord.Z})#{i}";
-            go.transform.position = worldOrigin + new Vector3(s.x, s.y, s.z);
-            go.transform.rotation = Quaternion.identity;
-
-            chunk.SpawnedInstances.Add(go.transform);
-        }
+        chunkObjectGenerator.LoadContent(chunk, settings, chunkObjectStorager);
     }
 
     private void UnloadChunkContent(ChunkData chunk)
     {
-        if (chunk == null)
-        {
-            return;
-        }
-
-        if (chunk.ObjectSaveData != null && chunk.ObjectSaveData.spawns != null)
-        {
-            int count = Mathf.Min(chunk.ObjectSaveData.spawns.Count, chunk.SpawnedInstances.Count);
-            Vector3 worldOrigin = new Vector3(chunk.Bounds.MinX, chunk.Bounds.MinY, chunk.Bounds.MinZ);
-            bool anyDirty = false;
-            for (int i = 0; i < count; i++)
-            {
-                Transform t = chunk.SpawnedInstances[i];
-                if (t == null)
-                {
-                    continue;
-                }
-
-                ChunkSpawnData s = chunk.ObjectSaveData.spawns[i];
-                Vector3 local = t.position - worldOrigin;
-                int nx = Mathf.RoundToInt(local.x);
-                int ny = Mathf.RoundToInt(local.y);
-                int nz = Mathf.RoundToInt(local.z);
-                if (s.x != nx || s.y != ny || s.z != nz)
-                {
-                    s.x = nx;
-                    s.y = ny;
-                    s.z = nz;
-                    anyDirty = true;
-                }
-            }
-
-            if (anyDirty)
-            {
-                ChunkStorager.SaveChunkObjectsAsync(chunk.ObjectSaveData, settings);
-            }
-        }
-
-        chunk.SpawnedInstances.Clear();
-        DestroyChunkObjectRoot(chunk);
-    }
-
-    private void EnsureChunkObjectRoot(ChunkData chunk)
-    {
-        if (chunk.ObjectRoot != null)
-        {
-            return;
-        }
-
-        Transform parent = settings.ChunkObjectParent;
-        GameObject go = new GameObject($"ChunkObjects ({chunk.Coord.X}, {chunk.Coord.Z})");
-        go.transform.SetParent(parent, worldPositionStays: false);
-        go.transform.position = new Vector3(chunk.Bounds.MinX, chunk.Bounds.MinY, chunk.Bounds.MinZ);
-        chunk.ObjectRoot = go.transform;
-    }
-
-    private static void DestroyChunkObjectRoot(ChunkData chunk)
-    {
-        if (chunk.ObjectRoot == null)
-        {
-            return;
-        }
-
-        Object.Destroy(chunk.ObjectRoot.gameObject);
-        chunk.ObjectRoot = null;
+        chunkObjectGenerator.UnloadContent(chunk, settings, chunkObjectStorager);
     }
 
     #endregion
@@ -329,7 +236,7 @@ public class ChunkManager : MonoBehaviour
         Gizmos.color = settings.ActiveChunkWireColor;
         foreach (ChunkData chunk in chunks.Values)
         {
-            if (chunk.State != ChunkState.Active)
+            if (chunk is not { State: ChunkState.Active })
             {
                 continue;
             }

@@ -13,10 +13,18 @@
   - `ChunkVoxelData.cs`：**体素数据（演进方向）**（Chunk 内 blockId 网格；以 local 坐标访问）
 - `Assets/ChunkBaseGame/ChunkTest/Chunk/Utils/`
   - `ChunkUtil.cs`：**工具类**（纯函数坐标转换：World ↔ ChunkCoord/Local）
-- `Assets/ChunkBaseGame/ChunkTest/Chunk/Server/`
-  - `ChunkManager.cs`：**区块与内容管线**（窗口、Load/Unload、读档/写盘、实例化、卸载回写、场景根节点）
-  - `ChunkGenerator.cs`：**纯生成逻辑**（每个区块生成哪些东西、怎么生成、chunk-local 格点在哪；产出 `ChunkObjectSaveData`，不碰 IO 与 Instantiate）
-  - `ChunkStorager.cs`：**存储层**（磁盘 IO；当前 JSON 原型；支持异步合并写入）
+- `Assets/ChunkBaseGame/ChunkTest/Chunk/Interfaces/`
+  - `IChunkManager.cs`：**区块表对外契约**（`LoadChunk` / `UnloadChunk` / `Chunks` / `TryGetChunk`）
+  - `IChunkObjectGenerator.cs`：**内容生成策略**（`LoadContent` / `UnloadContent`）
+  - `IChunkObjectStorager.cs`：**对象存档持久化**（`TryLoad` / `Save` / `SaveAsync`）
+- `Assets/ChunkBaseGame/ChunkTest/Chunk/Server/Managers/`
+  - `ChunkManager.cs`：实现 `IChunkManager`；按玩家位置维护加载窗口、`LoadChunk`/`UnloadChunk`；内容委托 **`IChunkObjectGenerator`**；默认构造 `JsonChunkObjectStorager` 并仅传入生成器
+- `Assets/ChunkBaseGame/ChunkTest/Chunk/Server/Generators/`
+  - `HeightColumnChunkObjectGenerator.cs`：**默认内容策略**（prefab 柱体）
+  - `MeshNoiseTerrainChunkGenerator.cs`：**实验** — FBM+Perlin 连续高度场 → 单 Mesh + **MeshCollider**；`ChunkObjectSaveData.terrainHeights`（`(Size+1)²`）
+- `Assets/ChunkBaseGame/ChunkTest/Chunk/Server/Storagers/`
+  - `JsonChunkObjectStorager.cs`：**默认** JSON（`chunk_{id}.json`）
+  - `JsonHeightmapTerrainChunkStorager.cs`：**实验** — 高度图 JSON（`chunk_{id}_terrain.json`），与默认存档分文件
 - `Assets/ChunkBaseGame/ChunkTest/Test/`
   - `Debugger/ShowChunkDebugger.cs`：调试面板（Chunks、FPS、CPU 等）
   - `PlayerAndCarmera/`：玩家与相机控制脚本（测试用）
@@ -34,16 +42,21 @@
 
 ### 1) Config：所有可调参数只放配置
 `ChunkConfig -> ChunkSettings` 是唯一配置来源。  
-Manager、Generator 与 Storager 都只读 `ChunkSettings`，避免散落的 Inspector 字段导致配置漂移。
+Manager 与内容策略（生成器 / 存储器实现）都只读 `ChunkSettings`，避免散落的 Inspector 字段导致配置漂移。
 
-### 2) Manager：区块调度 + 内容加载/卸载管线
-`ChunkManager` 负责：
+### 2) Manager：只负责「调度其他系统」与「对区块的管理」
+`ChunkManager` **只关心**：
 - 根据玩家位置计算窗口（方形/圆形）
-- 加载缺失 chunk、卸载离开窗口的 chunk
-- 维护 `Dictionary<long, ChunkData>` 缓存
-- 读档 / 无档时调用 `ChunkGenerator` 得到数据 / 异步写盘 / 实例化 prefab / 卸载时写回 DTO 再保存 / 销毁场景根节点
+- 何时应 `LoadChunk` / `UnloadChunk`、维护 `Dictionary<long, ChunkData>` 缓存
+- 实现 **`IChunkManager`**（对外 `LoadChunk` / `UnloadChunk` / `Chunks` / `TryGetChunk`）
+- 在合适的时机把 **同一份** `ChunkSettings` 与 `IChunkObjectStorager` 交给内容策略：`LoadContent` / `UnloadContent`
 
-**不**在 Manager 里写具体地形算法；算法只在 `ChunkGenerator`。
+`ChunkManager` **刻意不关心**（也不应出现对应实现代码）：
+- 区块内容如何**读档 / 生成 / 写入磁盘 / 异步队列保存**
+- prefab **如何实例化**、场景根节点如何创建/销毁
+- 卸载时 Transform **如何写回** DTO、是否与 `spawns` 索引对齐
+
+上述全部由注入的 **`IChunkObjectGenerator`** 实现类自行编排（内部可按需调用 `IChunkObjectStorager`）。Manager 层只保留**一行级委托**，避免调度与内容实现耦合。
 
 ### 3) Data：运行时数据与存档数据分离（以 `ChunkData` 为核心）
 `ChunkData` 是区块的**运行时聚合体**：它把“身份、边界、状态、运行时托管对象、存档 DTO”聚在一起供 Manager 缓存与调度，但会刻意区分哪些是**身份/派生数据**，哪些是**运行时引用**，哪些是**可落盘数据**。
@@ -63,32 +76,30 @@ Manager、Generator 与 Storager 都只读 `ChunkSettings`，避免散落的 Ins
   - 推荐约定：`localX/localZ ∈ [0, Size-1]`，`localY = worldY - MinY`（使局部 Y 从 0 开始，数组更紧凑）。
   - World ↔ Local 的换算统一通过 `ChunkBounds.MinX/MinY/MinZ` 做偏移（见 `ChunkUtil.WorldToLocal/LocalToWorld`），避免各处自己算导致 off-by-one。
 
-### 3) Generator：只负责「生成数据」（`ChunkGenerator`，当前 prefab 占位验证）
-- 输出 `ChunkObjectSaveData`：`prefabIndex` + chunk-local `(x,y,z)`
-- 当前实现：Perlin 高度图 + 每列竖条占位（**不**读盘、不 Instantiate）
-- 实例化与回写存档由 `ChunkManager` + `ChunkStorager` 完成
+### 4) Generator（`IChunkObjectGenerator`）：区块内容的「唯一实现入口」（相对 Manager）
+- 契约方法：`LoadContent(chunk, settings, storager)`、`UnloadContent(chunk, settings, storager)`
+- 默认实现 `HeightColumnChunkObjectGenerator`：在内部完成读档 → 无则生成 `ChunkObjectSaveData`（`prefabIndex` + chunk-local `(x,y,z)`）→ `SaveAsync`、按 `spawns` **Instantiate**、卸载时回写格点再保存、销毁对象根节点等
+- 换「体素 + Mesh、无 prefab」等内容形态时：新增实现类并在 Inspector 的 **Serialize Reference** 上替换即可，**无需改** `ChunkManager`
 
-> 注意：这只是验证管线的临时手段，性能无法支撑 MC 规模（见下文“注意事项/瓶颈”）。
+> 注意：prefab 竖条只是验证管线的临时手段，性能无法支撑 MC 规模（见下文“注意事项/瓶颈”）。
 
-### 4) Storager：存储完全解耦（存档结构不反向污染运行时结构）
-`ChunkStorager` 只管：
-- `TryLoadChunkObjects(chunkId, settings, out data)`
-- `SaveChunkObjects(data, settings)`
+### 5) Storager（`IChunkObjectStorager`）：纯持久化，由生成器编排调用
+默认 `JsonChunkObjectStorager` 提供：
+- `TryLoad(chunkId, settings, out data)`
+- `Save` / `SaveAsync`
 
-后续切换为二进制/Region 文件/多世界目录时，只需要改 Storager；换地形/内容规则时主要改 `ChunkGenerator.GenerateChunkObjectSaveData` 及其分支。
+后续切换为二进制/Region/多世界目录时，实现新的 `IChunkObjectStorager` 并在组合处注入；**Manager 仍不感知**格式细节。
 
 ---
 
 ## 当前原型的“可运行闭环”
 
-1. 玩家进入窗口 → `ChunkManager.LoadChunk` 创建 `ChunkData`
-2. `ChunkManager.LoadChunkContent`：
-   - `ChunkStorager.TryLoadChunkObjects`；若无则 `ChunkGenerator.GenerateChunkObjectSaveData` 再异步写盘
-   - 按 `spawns` 实例化 prefab
+1. 玩家进入窗口 → `ChunkManager.LoadChunk` 创建 `ChunkData` 并调用 **`IChunkObjectGenerator.LoadContent`**
+2. **`IChunkObjectGenerator.LoadContent`**（默认实现内顺序举例）：
+   - `storager.TryLoad`；若无则生成 `ChunkObjectSaveData` 并 `SaveAsync`
+   - 按 `spawns` 实例化 prefab、写入 `ChunkData.SpawnedInstances` 等
 3. 玩家离开窗口 → `ChunkManager.UnloadChunk`
-4. `ChunkManager.UnloadChunkContent`：
-   - 将 Transform 写回 `spawns` 的 chunk-local 格点，有变化则异步保存
-   - 清空 `SpawnedInstances`，销毁 chunk 对象根节点
+4. **`IChunkObjectGenerator.UnloadContent`**（默认实现内）：回写格点、按需 `SaveAsync`、清理列表并销毁根节点
 
 ---
 
@@ -164,9 +175,9 @@ Unity 推荐：
 
 ## 建议的下一步（最短路径）
 
-1. 保持 `ChunkManager` 调度不动
-2. 把 prefab 生成的密度降到可交互程度（否则编辑器无法验证其它系统）
-3. 新增 `ChunkVoxelData` 与 **朴素 Mesher**，让每个 chunk 只有 1 个 Mesh（性能立刻好一个数量级）
+1. 保持 `ChunkManager` 的区块窗口调度与对生成器的委托分工
+2. 把 prefab 生成的密度降到可交互程度（否则编辑器无法验证其它系统；可在 **生成器实现** 内调节）
+3. 新增 `ChunkVoxelData` 与 **朴素 Mesher**，让每个 chunk 只有 1 个 Mesh（性能立刻好一个数量级；建议新的 `IChunkObjectGenerator` 实现承载）
 
 ---
 
